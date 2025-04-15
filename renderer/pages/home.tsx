@@ -828,7 +828,7 @@ export default function HomePage() {
               {currentFile && (
                 <MDXEditor
                   key={currentFile}
-                  markdown={value}
+        markdown={value}
                   onChange={(newValue) => {
                     console.log('=== EDITOR ONCHANGE START ===');
                     console.log('Editor content changed:', {
@@ -972,7 +972,7 @@ export default function HomePage() {
             </button>
           </div>
         )}
-      </div>
+    </div>
     </RealmProvider>
   );
 }
