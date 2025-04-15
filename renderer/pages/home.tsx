@@ -6,15 +6,18 @@ import MdxEditor from '../components/InitializedMDXEditor';
 import { useRouter } from 'next/navigation';
 import { RealmProvider } from '@mdxeditor/editor';
 import { MDXEditor } from '@mdxeditor/editor';
-// import '@mdxeditor/editor/style.css'
-
-import { BlockTypeSelect, BoldItalicUnderlineToggles, Button, ButtonOrDropdownButton, UndoRedo, headingsPlugin, imagePlugin, linkPlugin, listsPlugin, quotePlugin, thematicBreakPlugin, toolbarPlugin } from '@mdxeditor/editor';
+import '@mdxeditor/editor/style.css';
+import DirectoryModal from '../components/DirectoryModal';
+import path from 'path';
 
 declare global {
   interface Window {
-    ipc: {
-      send: (channel: string, value: unknown) => void;
-      on: (channel: string, callback: (...args: unknown[]) => void) => () => void;
+    electron: {
+      ipcRenderer: {
+        invoke(channel: string, ...args: any[]): Promise<any>;
+        send(channel: string, ...args: any[]): void;
+        on(channel: string, callback: (...args: any[]) => void): () => void;
+      };
     };
   }
 }
@@ -26,6 +29,7 @@ interface FileNode {
   content?: string;
   parentId: string | null;
   children?: FileNode[];
+  path?: string;
 }
 
 const translations = {
@@ -49,6 +53,25 @@ const translations = {
 
 const translate = (key: string) => translations[key] || key;
 
+const plugins: any[] = []; // Empty plugins array
+
+const globalStyles = `
+  .mdxeditor-content-editable {
+    color: inherit !important;
+  }
+  [data-lexical-editor] {
+    color: inherit !important;
+  }
+  [data-lexical-editor] *,
+  [data-lexical-editor] [contenteditable="true"],
+  [data-lexical-editor] [contenteditable="true"] * {
+    color: inherit !important;
+  }
+  [contenteditable="true"] {
+    color: inherit !important;
+  }
+`;
+
 export default function HomePage() {
   const [fileSystem, setFileSystem] = useState<FileNode[]>([{
     id: 'root',
@@ -69,11 +92,24 @@ export default function HomePage() {
   const [currentFile, setCurrentFile] = useState<string | null>('welcome');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [showRenameModal, setShowRenameModal] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<FileNode | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  const [showDirectoryModal, setShowDirectoryModal] = useState(true);
+  const [lipiDirectory, setLipiDirectory] = useState<string | null>(null);
   
   const router = useRouter();
   const editorRef = React.useRef(null);
+
+  useEffect(() => {
+    const checkSavedDirectory = async () => {
+      const savedPath = await window.electron.ipcRenderer.invoke('get-saved-directory');
+      if (savedPath) {
+        setLipiDirectory(savedPath);
+        setShowDirectoryModal(false);
+      }
+    };
+    checkSavedDirectory();
+  }, []);
 
   useEffect(() => {
     // Get transparency state from localStorage after component mounts
@@ -82,7 +118,7 @@ export default function HomePage() {
       setIsTransparent(JSON.parse(saved));
     }
     // Send initial transparency state to main process
-    window.ipc.send('toggle-transparency', isTransparent);
+    window.electron.ipcRenderer.send('toggle-transparency', isTransparent);
   }, []);
 
   // Load file system from localStorage on mount
@@ -98,23 +134,115 @@ export default function HomePage() {
     localStorage.setItem('fileSystem', JSON.stringify(fileSystem));
   }, [fileSystem]);
 
-  // Load file content when switching files
+  // Load file system from disk on mount
   useEffect(() => {
-    if (currentFile) {
-      const file = findFileById(currentFile, fileSystem);
-      if (file && file.type === 'file') {
-        setValue(file.content || '');
-      }
-    }
-  }, [currentFile]);
+    const loadFileSystem = async () => {
+      if (lipiDirectory) {
+        console.log('Loading file system from directory:', lipiDirectory);
+        const result = await window.electron.ipcRenderer.invoke('read-directory', lipiDirectory);
+        if (result.success) {
+          console.log('Directory contents:', result.contents);
+          
+          const rootNode: FileNode = {
+            id: 'root',
+            name: 'root',
+            type: 'folder',
+            parentId: null,
+            children: [],
+            path: lipiDirectory
+          };
 
-  // Save file content when it changes
+          const processItems = async (items: any[], parentId: string): Promise<FileNode[]> => {
+            const nodes: FileNode[] = [];
+            for (const item of items) {
+              console.log('Processing item:', {
+                name: item.name,
+                path: item.path,
+                type: item.type
+              });
+
+              // Generate a stable ID based on the file path
+              const nodeId = Buffer.from(item.path).toString('base64');
+
+              const node: FileNode = {
+                id: nodeId,
+                name: item.name,
+                type: item.type === 'directory' ? 'folder' : 'file',
+                parentId,
+                path: item.path,
+                children: item.type === 'directory' ? [] : undefined
+              };
+
+              if (item.type === 'file') {
+                // Load file content
+                console.log('Loading content for file:', {
+                  name: item.name,
+                  path: item.path
+                });
+                const contentResult = await window.electron.ipcRenderer.invoke('read-file', item.path);
+                if (contentResult.success) {
+                  console.log('File content loaded:', {
+                    name: item.name,
+                    path: item.path,
+                    content: contentResult.content
+                  });
+                  node.content = contentResult.content;
+                  // If this is the current file, update the editor value
+                  if (currentFile === nodeId) {
+                    setValue(contentResult.content);
+                  }
+                } else {
+                  console.error('Failed to load file content:', {
+                    name: item.name,
+                    path: item.path,
+                    error: contentResult.reason
+                  });
+                }
+              }
+
+              if (item.type === 'directory' && item.children) {
+                node.children = await processItems(item.children, nodeId);
+              }
+
+              nodes.push(node);
+            }
+            return nodes;
+          };
+
+          rootNode.children = await processItems(result.contents, 'root');
+          console.log('Final file system state:', rootNode);
+          setFileSystem([rootNode]);
+        } else {
+          console.error('Failed to load directory:', result.reason);
+        }
+      }
+    };
+    loadFileSystem();
+  }, [lipiDirectory, currentFile]);
+
+  // Handle Ctrl+S for saving
   useEffect(() => {
-    if (currentFile) {
-      const updatedFS = updateFileContent(currentFile, value, fileSystem);
-      setFileSystem(updatedFS);
-    }
-  }, [value]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (currentFile) {
+          const file = findFileById(currentFile, fileSystem);
+          if (file && file.type === 'file') {
+            console.log('Manual save triggered:', {
+              id: currentFile,
+              name: file.name,
+              path: file.path,
+              content: value
+            });
+            handleEditorChange(value);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentFile, value, fileSystem]);
 
   const findFileById = (id: string, nodes: FileNode[] = fileSystem): FileNode | null => {
     for (const node of nodes) {
@@ -149,45 +277,162 @@ export default function HomePage() {
   };
 
   const handleRestart = () => {
-    window.ipc.send('restart-app', null);
+    window.electron.ipcRenderer.send('restart-app', null);
   };
 
   const handleWindowControl = (action: 'minimize' | 'maximize' | 'close') => {
-    window.ipc.send('window-control', action);
+    window.electron.ipcRenderer.send('window-control', action);
   };
 
-  const handleNewFile = (parentId: string) => {
+  const handleEditorChange = async (newValue: string) => {
+    console.log('=== HANDLE EDITOR CHANGE START ===');
+    console.log('handleEditorChange called with:', {
+      currentValue: value,
+      newValue,
+      currentFile,
+      valueLength: newValue.length,
+      newValuePreview: newValue.substring(0, 50)
+    });
+
+    if (!currentFile) {
+      console.error('No current file selected');
+      return;
+    }
+
+    const file = findFileById(currentFile, fileSystem);
+    if (!file || file.type !== 'file') {
+      console.error('File not found or not a file:', {
+        currentFile,
+        file
+      });
+      return;
+    }
+
+    // Update in-memory state
+    setValue(newValue);
+    const updatedFS = updateFileContent(currentFile, newValue, fileSystem);
+    setFileSystem(updatedFS);
+
+    // Save to disk
+    try {
+      const filePath = path.join(lipiDirectory, file.name);
+      console.log('Saving to file:', {
+        filePath,
+        contentLength: newValue.length,
+        contentPreview: newValue.substring(0, 50)
+      });
+
+      const result = await window.electron.ipcRenderer.invoke('write-file', filePath, newValue);
+      if (!result.success) {
+        console.error('Failed to save file:', result.reason);
+      }
+    } catch (error) {
+      console.error('Error saving file:', error);
+    }
+
+    console.log('=== HANDLE EDITOR CHANGE END ===');
+  };
+
+  const confirmRename = async (id: string, newName: string) => {
+    if (!newName.trim()) return;
+    
+    const node = findFileById(id, fileSystem);
+    if (!node) return;
+
+    console.log('Renaming file:', {
+      id,
+      oldPath: node.path,
+      newName
+    });
+
+    // Update in-memory state
+    const renameNode = (nodes: FileNode[]): FileNode[] => {
+      return nodes.map(node => {
+        if (node.id === id) {
+          const newPath = path.join(path.dirname(node.path), newName);
+          return { ...node, name: newName, path: newPath };
+        }
+        if (node.children) {
+          return { ...node, children: renameNode(node.children) };
+        }
+        return node;
+      });
+    };
+    
+    const updatedFileSystem = renameNode(fileSystem);
+    setFileSystem(updatedFileSystem);
+    setEditingId(null);
+
+    // Save rename to disk
+    const result = await window.electron.ipcRenderer.invoke('rename-item', node.path, newName);
+    if (!result.success) {
+      console.error('Failed to rename file:', result.reason);
+      return;
+    }
+
+    console.log('Rename successful:', {
+      id,
+      newPath: result.path
+    });
+
+    // If this is the current file, update its state
+    if (currentFile === id) {
+      const updatedFile = findFileById(id, updatedFileSystem);
+      if (updatedFile && updatedFile.type === 'file') {
+        // Reload content from the new path
+        console.log('Reloading content from new path:', result.path);
+        const contentResult = await window.electron.ipcRenderer.invoke('read-file', result.path);
+        if (contentResult.success) {
+          setValue(contentResult.content);
+          const finalFileSystem = updateFileContent(id, contentResult.content, updatedFileSystem);
+          setFileSystem(finalFileSystem);
+        } else {
+          console.error('Failed to reload content:', contentResult.reason);
+        }
+      }
+    }
+  };
+
+  const handleNewFile = async (parentId: string) => {
+    const parent = findFileById(parentId, fileSystem);
+    if (!parent) return;
+
+    // Find the next available untitled file number
+    let untitledNumber = 1;
+    const existingFiles = getAllFiles(fileSystem);
+    while (existingFiles.some(file => file.name === `untitled${untitledNumber}.md`)) {
+      untitledNumber++;
+    }
+
+    const newFileName = `untitled${untitledNumber}.md`;
+    const newFilePath = path.join(parent.path || lipiDirectory || '', newFileName);
+
     const newFile: FileNode = {
       id: generateUniqueId(),
-      name: 'New File.md',
+      name: newFileName,
       type: 'file',
       content: '',
-      parentId
+      parentId,
+      path: newFilePath
     };
-    addNodeToFileSystem(parentId, newFile);
-    setCurrentFile(newFile.id);
-    handleRename(newFile);
-  };
 
-  const handleNewFolder = (parentId: string) => {
-    const newFolder: FileNode = {
-      id: generateUniqueId(),
-      name: 'New Folder',
-      type: 'folder',
-      children: [],
-      parentId
-    };
-    addNodeToFileSystem(parentId, newFolder);
-    handleRename(newFolder);
-  };
+    // Create file on disk
+    const result = await window.electron.ipcRenderer.invoke('create-file', parent.path || lipiDirectory || '', newFileName);
+    if (!result.success) {
+      console.error('Failed to create file:', result.reason);
+      return;
+    }
 
-  const addNodeToFileSystem = (parentId: string, newNode: FileNode) => {
+    // Update the path with the actual path returned from the main process
+    newFile.path = result.path;
+
+    // Update in-memory state
     const updateNodes = (nodes: FileNode[]): FileNode[] => {
       return nodes.map(node => {
         if (node.id === parentId) {
           return {
             ...node,
-            children: [...(node.children || []), newNode]
+            children: [...(node.children || []), newFile]
           };
         }
         if (node.children) {
@@ -200,6 +445,69 @@ export default function HomePage() {
       });
     };
     setFileSystem(updateNodes(fileSystem));
+    setCurrentFile(newFile.id);
+    handleRename(newFile);
+  };
+
+  const getAllFiles = (nodes: FileNode[]): FileNode[] => {
+    let files: FileNode[] = [];
+    nodes.forEach(node => {
+      if (node.type === 'file') {
+        files.push(node);
+      }
+      if (node.children) {
+        files = [...files, ...getAllFiles(node.children)];
+      }
+    });
+    return files;
+  };
+
+  const handleNewFolder = async (parentId: string) => {
+    const parent = findFileById(parentId, fileSystem);
+    if (!parent) return;
+
+    const newFolderName = 'New Folder';
+    const newFolderPath = path.join(parent.path || lipiDirectory || '', newFolderName);
+
+    const newFolder: FileNode = {
+      id: generateUniqueId(),
+      name: newFolderName,
+      type: 'folder',
+      children: [],
+      parentId,
+      path: newFolderPath
+    };
+
+    // Create folder on disk
+    const result = await window.electron.ipcRenderer.invoke('create-directory', parent.path || lipiDirectory || '', newFolderName);
+    if (!result.success) {
+      console.error('Failed to create folder:', result.reason);
+      return;
+    }
+
+    // Update the path with the actual path returned from the main process
+    newFolder.path = result.path;
+
+    // Update in-memory state
+    const updateNodes = (nodes: FileNode[]): FileNode[] => {
+      return nodes.map(node => {
+        if (node.id === parentId) {
+          return {
+            ...node,
+            children: [...(node.children || []), newFolder]
+          };
+        }
+        if (node.children) {
+          return {
+            ...node,
+            children: updateNodes(node.children)
+          };
+        }
+        return node;
+      });
+    };
+    setFileSystem(updateNodes(fileSystem));
+    handleRename(newFolder);
   };
 
   const handleDelete = (id: string) => {
@@ -224,32 +532,76 @@ export default function HomePage() {
   };
 
   const handleRename = (node: FileNode) => {
-    setRenameTarget(node);
-    setShowRenameModal(true);
+    setEditingId(node.id);
   };
 
-  const confirmRename = (newName: string) => {
-    if (!renameTarget || !newName.trim()) return;
+  const handleFileSelect = async (id: string) => {
+    console.log('=== FILE SELECT START ===');
+    console.log('Selecting file:', {
+      id,
+      currentFile,
+      value
+    });
     
-    const renameNode = (nodes: FileNode[]): FileNode[] => {
-      return nodes.map(node => {
-        if (node.id === renameTarget.id) {
-          return { ...node, name: newName };
-        }
-        if (node.children) {
-          return { ...node, children: renameNode(node.children) };
-        }
-        return node;
-      });
-    };
+    // If we're switching from a file that has unsaved changes, save them first
+    if (currentFile) {
+      const currentFileNode = findFileById(currentFile, fileSystem);
+      if (currentFileNode && currentFileNode.type === 'file') {
+        console.log('Saving current file before switch:', {
+          id: currentFile,
+          name: currentFileNode.name,
+          path: currentFileNode.path,
+          content: value
+        });
+        await handleEditorChange(value);
+      }
+    }
     
-    setFileSystem(renameNode(fileSystem));
-    setShowRenameModal(false);
-    setRenameTarget(null);
-  };
-
-  const handleFileSelect = (id: string) => {
     setCurrentFile(id);
+    
+    const file = findFileById(id, fileSystem);
+    if (file && file.type === 'file') {
+      console.log('Loading file content:', {
+        id,
+        name: file.name,
+        path: file.path
+      });
+      
+      // Load content from disk
+      const result = await window.electron.ipcRenderer.invoke('read-file', file.path);
+      console.log('Read file result:', {
+        success: result.success,
+        contentLength: result.success ? result.content.length : 0,
+        error: !result.success ? result.reason : null
+      });
+
+      if (result.success) {
+        console.log('Updating editor with content:', {
+          id,
+          name: file.name,
+          contentLength: result.content.length,
+          contentPreview: result.content.substring(0, 100)
+        });
+        
+        // Update both the editor value and file system state
+        setValue(result.content);
+        const updatedFS = updateFileContent(id, result.content, fileSystem);
+        setFileSystem(updatedFS);
+        
+        // Force editor to update by setting a temporary value and then the actual content
+        setValue('');
+        setTimeout(() => {
+          setValue(result.content);
+        }, 0);
+      } else {
+        console.error('Failed to load file content:', {
+          id,
+          name: file.name,
+          error: result.reason
+        });
+      }
+    }
+    console.log('=== FILE SELECT END ===');
   };
 
   const handleBack = () => {
@@ -272,22 +624,100 @@ export default function HomePage() {
     }
   };
 
-  const handleEditorChange = (value: string) => {
-    setValue(value);
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (contextMenu && !(event.target as Element).closest('.context-menu')) {
+        setContextMenu(null);
+      }
+    };
+
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [contextMenu]);
+
+  const handleDirectorySelect = async (path: string) => {
+    setLipiDirectory(path);
+    setShowDirectoryModal(false);
+    // Save the selected directory
+    await window.electron.ipcRenderer.invoke('save-directory', path);
   };
 
-  const plugins = [
-    headingsPlugin(),
-    listsPlugin(),
-    thematicBreakPlugin(),
-    linkPlugin(),
-    imagePlugin(),
-    quotePlugin()
-  ];
+  const renderFileTree = (nodes: FileNode[], level: number = 0) => {
+    return nodes.map((node) => (
+      <div key={node.id}>
+        <div 
+          className={`group flex items-center px-2 py-1.5 rounded-md transition-all duration-200 ${
+            currentFile === node.id ? 'bg-gray-100' : 'hover:bg-gray-50'
+          }`}
+          style={{ paddingLeft: `${level * 12 + 8}px` }}
+          onClick={() => {
+            if (node.type === 'file') {
+              handleFileSelect(node.id);
+            } else {
+              // Toggle folder selection
+              setCurrentFile(currentFile === node.id ? null : node.id);
+            }
+          }}
+          onDoubleClick={() => handleRename(node)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              nodeId: node.id
+            });
+          }}
+        >
+          <div className="flex items-center flex-1 cursor-pointer">
+            {node.type === 'folder' ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-500 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-500 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+              </svg>
+            )}
+            {editingId === node.id ? (
+              <input
+                type="text"
+                className="text-sm text-gray-700 bg-transparent border-none focus:ring-0 p-0 w-full"
+                defaultValue={node.name}
+                autoFocus
+                onBlur={(e) => confirmRename(node.id, e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    confirmRename(node.id, e.currentTarget.value);
+                  } else if (e.key === 'Escape') {
+                    setEditingId(null);
+                  }
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span className="text-sm text-gray-700 font-medium">{node.name}</span>
+            )}
+          </div>
+        </div>
+        {node.type === 'folder' && node.children && node.children.length > 0 && (
+          <div className="ml-2">
+            {renderFileTree(node.children, level + 1)}
+          </div>
+        )}
+      </div>
+    ));
+  };
 
   return (
     <RealmProvider>
+      <style jsx global>{globalStyles}</style>
       <div className={`flex flex-col h-screen ${isTransparent ? 'bg-transparent' : 'bg-white'}`}>
+        {showDirectoryModal && (
+          <DirectoryModal
+            onDirectorySelect={handleDirectorySelect}
+            defaultPath={lipiDirectory}
+          />
+        )}
         {/* Titlebar */}
         <div className={`flex items-center justify-between ${isTransparent ? 'bg-transparent' : 'bg-white'} text-black px-4 py-2 border-b border-gray-200`}>
           <div className="flex items-center space-x-4">
@@ -333,16 +763,16 @@ export default function HomePage() {
               <span className="text-sm font-medium text-gray-700">Files</span>
               <div className="flex items-center space-x-1">
                 <button 
-                  onClick={() => handleNewFile('root')}
+                  onClick={() => handleNewFile(currentFile || 'root')}
                   className="p-1 hover:bg-gray-200 rounded" 
                   title="New File"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                    <path d="M10 3a1 1 0 00-1 1v5H4a1 1 0 100 2h5v5a1 1 0 102 0v-5h5a1 1 0 100-2h-5V4a1 1 0 00-1-1z" clipRule="evenodd" />
                   </svg>
                 </button>
                 <button 
-                  onClick={() => handleNewFolder('root')}
+                  onClick={() => handleNewFolder(currentFile || 'root')}
                   className="p-1 hover:bg-gray-200 rounded" 
                   title="New Folder"
                 >
@@ -356,74 +786,7 @@ export default function HomePage() {
 
             {/* File Tree */}
             <div className="flex-1 overflow-y-auto px-1 py-2">
-              {fileSystem[0].children?.map((node) => (
-                <div 
-                  key={node.id}
-                  className={`group flex items-center justify-between px-2 py-1 rounded hover:bg-gray-200 ${
-                    currentFile === node.id ? 'bg-gray-200' : ''
-                  }`}
-                >
-                  <div 
-                    className="flex items-center flex-1 cursor-pointer"
-                    onClick={() => node.type === 'file' ? handleFileSelect(node.id) : null}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-600 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                      {node.type === 'folder' ? (
-                        <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-                      ) : (
-                        <>
-                          <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                          <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-                        </>
-                      )}
-                    </svg>
-                    <span className="text-sm text-gray-700">{node.name}</span>
-                  </div>
-                  <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100">
-                    <button
-                      onClick={() => handleRename(node)}
-                      className="p-1 hover:bg-gray-300 rounded"
-                      title="Rename"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                      </svg>
-                    </button>
-                    {node.type === 'folder' && (
-                      <>
-                        <button
-                          onClick={() => handleNewFile(node.id)}
-                          className="p-1 hover:bg-gray-300 rounded"
-                          title="New File"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M10 3a1 1 0 00-1 1v5H4a1 1 0 100 2h5v5a1 1 0 102 0v-5h5a1 1 0 100-2h-5V4a1 1 0 00-1-1z" clipRule="evenodd" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={() => handleNewFolder(node.id)}
-                          className="p-1 hover:bg-gray-300 rounded"
-                          title="New Folder"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
-                            <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-                            <path stroke="#374151" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v4m-2-2h4" />
-                          </svg>
-                        </button>
-                      </>
-                    )}
-                    <button
-                      onClick={() => handleDelete(node.id)}
-                      className="p-1 hover:bg-red-100 rounded"
-                      title="Delete"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              ))}
+              {renderFileTree(fileSystem[0].children || [])}
             </div>
           </div>
 
@@ -461,13 +824,40 @@ export default function HomePage() {
             </div>
 
             {/* Editor Content */}
-            <div className="flex-1 overflow-auto">
+            <div className={`flex-1 overflow-auto ${isTransparent ? '' : 'bg-white'}`}>
               {currentFile && (
                 <MDXEditor
-                  markdown={findFileById(currentFile, fileSystem)?.content || ''}
-                  onChange={handleEditorChange}
+                  key={currentFile}
+                  markdown={value}
+                  onChange={(newValue) => {
+                    console.log('=== EDITOR ONCHANGE START ===');
+                    console.log('Editor content changed:', {
+                      currentValue: value,
+                      newValue,
+                      currentFile,
+                      valueLength: newValue.length,
+                      newValuePreview: newValue.substring(0, 100),
+                      isDifferent: newValue !== value
+                    });
+                    
+                    // Update the value state immediately
+                    setValue(newValue);
+                    
+                    // Then call handleEditorChange
+                    handleEditorChange(newValue);
+                    console.log('=== EDITOR ONCHANGE END ===');
+                  }}
                   plugins={plugins}
-                  contentEditableClassName="prose max-w-none"
+                  contentEditableClassName={`prose max-w-none bg-transparent p-4 outline-none focus:outline-none focus:ring-0 [&_*]:outline-none [&_*]:focus:outline-none [&_*]:focus:ring-0 ${
+                    isTransparent 
+                      ? 'text-white [&]:text-white [&_*]:text-white' 
+                      : 'text-black [&]:text-black [&_*]:text-black'
+                  }`}
+                  className={`outline-none focus:outline-none focus:ring-0 ${
+                    isTransparent 
+                      ? 'text-white bg-transparent' 
+                      : 'text-black bg-white'
+                  }`}
                   translation={translate}
                 />
               )}
@@ -512,42 +902,74 @@ export default function HomePage() {
           </button>
         </div>
 
-        {/* Rename Modal */}
-        {showRenameModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-            <div className="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
-              <h3 className="text-lg font-semibold text-black mb-4">Rename {renameTarget?.type}</h3>
-              <input
-                type="text"
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                defaultValue={renameTarget?.name}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    confirmRename(e.currentTarget.value);
-                  }
-                }}
-                autoFocus
-              />
-              <div className="flex justify-end space-x-3 mt-4">
+        {/* Context Menu */}
+        {contextMenu && (
+          <div 
+            className="context-menu fixed z-50 min-w-[180px] py-1 bg-white rounded-lg shadow-lg ring-1 ring-black ring-opacity-5 text-sm"
+            style={{
+              top: `${contextMenu.y}px`,
+              left: `${contextMenu.x}px`,
+            }}
+          >
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const node = findFileById(contextMenu.nodeId, fileSystem);
+                if (node) handleRename(node);
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-50 flex items-center group"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 text-gray-400 group-hover:text-gray-500" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+              </svg>
+              Rename
+            </button>
+            {findFileById(contextMenu.nodeId, fileSystem)?.type === 'folder' && (
+              <>
                 <button
-                  onClick={() => setShowRenameModal(false)}
-                  className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleNewFile(contextMenu.nodeId);
+                    setContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-50 flex items-center group"
                 >
-                  Cancel
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 text-gray-400 group-hover:text-gray-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 3a1 1 0 00-1 1v5H4a1 1 0 100 2h5v5a1 1 0 102 0v-5h5a1 1 0 100-2h-5V4a1 1 0 00-1-1z" clipRule="evenodd" />
+                  </svg>
+                  New File
                 </button>
                 <button
                   onClick={(e) => {
-                    const input = e.currentTarget.parentElement?.previousElementSibling as HTMLInputElement;
-                    if (input) {
-                      confirmRename(input.value);
-                    }
+                    e.stopPropagation();
+                    handleNewFolder(contextMenu.nodeId);
+                    setContextMenu(null);
                   }}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                  className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-50 flex items-center group"
                 >
-                  Rename
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 text-gray-400 group-hover:text-gray-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                    <path stroke="#374151" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v4m-2-2h4" />
+                  </svg>
+                  New Folder
                 </button>
-              </div>
-            </div>
+              </>
+            )}
+            <div className="h-px bg-gray-200 my-1"></div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDelete(contextMenu.nodeId);
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-gray-50 flex items-center group"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              Delete
+            </button>
           </div>
         )}
       </div>

@@ -1,20 +1,21 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
-const handler = {
-  send(channel: string, value: unknown) {
-    ipcRenderer.send(channel, value)
-  },
-  on(channel: string, callback: (...args: unknown[]) => void) {
-    const subscription = (_event: IpcRendererEvent, ...args: unknown[]) =>
-      callback(...args)
-    ipcRenderer.on(channel, subscription)
-
-    return () => {
-      ipcRenderer.removeListener(channel, subscription)
+// Expose protected methods that allow the renderer process to use
+// the ipcRenderer without exposing the entire object
+contextBridge.exposeInMainWorld(
+  'electron',
+  {
+    ipcRenderer: {
+      invoke: (channel: string, ...args: any[]) => {
+        return ipcRenderer.invoke(channel, ...args)
+      },
+      send: (channel: string, ...args: any[]) => {
+        ipcRenderer.send(channel, ...args)
+      },
+      on: (channel: string, func: (...args: any[]) => void) => {
+        ipcRenderer.on(channel, (event, ...args) => func(...args))
+        return () => ipcRenderer.removeListener(channel, func)
+      }
     }
-  },
-}
-
-contextBridge.exposeInMainWorld('ipc', handler)
-
-export type IpcHandler = typeof handler
+  }
+)
