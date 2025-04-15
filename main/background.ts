@@ -1,5 +1,5 @@
 import path from 'path'
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, BrowserWindow } from 'electron'
 import serve from 'electron-serve'
 import { createWindow } from './helpers'
 
@@ -11,10 +11,12 @@ if (isProd) {
   app.setPath('userData', `${app.getPath('userData')} (development)`)
 }
 
+let mainWindow: BrowserWindow;
+
 ;(async () => {
   await app.whenReady()
 
-  const mainWindow = createWindow('main', {
+  mainWindow = createWindow('main', {
     width: 1000,
     height: 600,
     webPreferences: {
@@ -37,3 +39,37 @@ app.on('window-all-closed', () => {
 ipcMain.on('message', async (event, arg) => {
   event.reply('message', `${arg} World!`)
 })
+
+// Handle transparency toggle
+ipcMain.on('toggle-transparency', (event, isTransparent) => {
+  if (mainWindow) {
+    mainWindow.setBackgroundColor(isTransparent ? '#2563eb33' : '#2563eb');
+  }
+});
+
+// Handle app restart
+ipcMain.on('restart-app', () => {
+  app.relaunch();
+  app.exit();
+});
+
+// Handle window controls
+ipcMain.on('window-control', (event, action) => {
+  if (!mainWindow) return;
+
+  switch (action) {
+    case 'minimize':
+      mainWindow.minimize();
+      break;
+    case 'maximize':
+      if (mainWindow.isMaximized()) {
+        mainWindow.unmaximize();
+      } else {
+        mainWindow.maximize();
+      }
+      break;
+    case 'close':
+      mainWindow.close();
+      break;
+  }
+});
