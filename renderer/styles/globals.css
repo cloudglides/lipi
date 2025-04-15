@@ -4,7 +4,10 @@
 
 @layer base {
   body {
-    @apply bg-gray-900 text-white;
+    @apply text-white bg-blue-600/40 min-h-screen ;
+    /* backdrop-filter: blur(10px); */
+    
+    /* -webkit-backdrop-filter: blur(10px); */
   }
 }
 
