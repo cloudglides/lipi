@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   BrowserWindowConstructorOptions,
   Rectangle,
+  Menu
 } from 'electron'
 import Store from 'electron-store'
 
@@ -71,14 +72,18 @@ export const createWindow = (
   state = ensureVisibleOnSomeDisplay(restore())
 
   const win = new BrowserWindow({
-    ...state,
-    ...options,
+    width: 800,
+    height: 600,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#2563eb33', // semi-transparent blue
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       ...options.webPreferences,
     },
   })
+  // Menu.setApplicationMenu(null)
 
   win.on('close', saveState)
 

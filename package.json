@@ -11,8 +11,11 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@editorjs/editorjs": "^2.30.8",
+    "@mdxeditor/editor": "^3.30.0",
     "electron-serve": "^1.3.0",
-    "electron-store": "^8.2.0"
+    "electron-store": "^8.2.0",
+    "jodit": "^4.6.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.16",

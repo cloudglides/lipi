@@ -1,35 +1,42 @@
-import React from 'react'
-import Head from 'next/head'
-import Link from 'next/link'
-import Image from 'next/image'
+'use client'; // if using Next.js app directory
+
+import dynamic from 'next/dynamic';
+import React, { useState } from 'react';
+import MdxEditor from '../components/InitializedMDXEditor';
+// import '@mdxeditor/editor/style.css'
+
+import { BlockTypeSelect, BoldItalicUnderlineToggles, Button, ButtonOrDropdownButton, UndoRedo, headingsPlugin, imagePlugin, linkPlugin, listsPlugin, quotePlugin, thematicBreakPlugin, toolbarPlugin, translation$ } from '@mdxeditor/editor';
 
 export default function HomePage() {
+  const [value, setValue] = useState(``);
+
+  const editorRef = React.useRef(null);
+
   return (
-    <React.Fragment>
-      <Head>
-        <title>Home - Nextron (with-tailwindcss)</title>
-      </Head>
-      <div className="grid grid-col-1 text-2xl w-full text-center">
-        <div>
-          <Image
-            className="ml-auto mr-auto"
-            src="/images/logo.png"
-            alt="Logo image"
-            width={256}
-            height={256}
-          />
-        </div>
-        <span>⚡ Electron ⚡</span>
-        <span>+</span>
-        <span>Next.js</span>
-        <span>+</span>
-        <span>tailwindcss</span>
-        <span>=</span>
-        <span>💕 </span>
-      </div>
-      <div className="mt-1 w-full flex-wrap flex justify-center">
-        <Link href="/next">Go to next page</Link>
-      </div>
-    </React.Fragment>
-  )
+    <div className='lg:px-12 z-50 h-screen md:px-8 px-5 py-5 '>
+      <MdxEditor
+        className='w-full h-full  text-white'
+        onChange={(value)=>{setValue(value); console.log(value)}}
+        editorRef={editorRef}
+        markdown={value}
+        plugins={[
+          headingsPlugin(),
+          listsPlugin(),
+          thematicBreakPlugin(),
+          linkPlugin(),
+          imagePlugin(),
+          quotePlugin(),
+          toolbarPlugin({
+            toolbarContents: () => (
+              <div className='flex items-center space-x-2'>
+                <UndoRedo />
+                <BoldItalicUnderlineToggles />
+                <BlockTypeSelect/>
+              </div>
+            ),
+          }),
+        ]}
+      />
+    </div>
+  );
 }
