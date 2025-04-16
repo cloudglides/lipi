@@ -45,7 +45,7 @@ const InnerRemirrorEditor: React.FC<RemirrorEditorProps> = ({ value, onChange, i
           onChange(markdown);
         }}
         autoFocus
-        classNames={[isTransparent ? 'bg-transparent text-black' : 'bg-white text-black']}
+        classNames={["h-screen", isTransparent ? 'bg-transparent text-black' : 'bg-white text-black']}
       />
     </ThemeProvider>
   );

@@ -9,6 +9,43 @@
     
     /* -webkit-backdrop-filter: blur(10px); */
   }
+  .titlebar-drag-region {
+    -webkit-app-region: drag;
+  }
+  .titlebar-no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .textarea::selection {
+    background-color: rgba(147, 197, 253, 0.3);
+    color: inherit;
+  }
+
+  code {
+    background-color: #f1f5f9;
+    padding: 0.1em 0.3em;
+    border-radius: 0.2em;
+    font-size: 0.9em;
+  }
+
+  strong {
+    font-weight: 600;
+    color: #1e293b;
+  }
+
+  em {
+    font-style: italic;
+    color: #475569;
+  }
+
+  a {
+    color: #2563eb;
+    text-decoration: none;
+  }
+
+  a:hover {
+    text-decoration: underline;
+  }
 }
 
 @layer components {
