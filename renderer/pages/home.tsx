@@ -91,7 +91,7 @@ const globalStyles = `
   }
   [data-lexical-editor] h1::before {
     content: '#';
-    opacity: 0.5;
+    opacity: 1;
     margin-right: 0.5em;
   }
 `;
@@ -123,10 +123,20 @@ export default function HomePage() {
         if (line.startsWith('# ')) {
           if (idx === activeLineIdx) {
             // Editing this line: show faded #
-            return `<div style="font-size:2em;font-weight:bold;"><span style='opacity:0.5;margin-right:0.5em;'>#</span>${line.slice(2)}</div>`;
+            console.log("heading1")
+            return `<div style="font-size:5em;font-weight:bold;"><span style='opacity:0.5;margin-right:0.5em;'>#</span>${line.slice(2)}</div>`;
           } else {
             // Not editing: show as heading, no #
-            return `<div style="font-size:2em;font-weight:bold;">${line.slice(2)}</div>`;
+            console.log("heading1")
+            return `<div style="font-size:5em;font-weight:bold;">${line.slice(2)}</div>`;
+          }
+        }else if(line.startsWith('## ')){
+          if (idx === activeLineIdx) {
+            // Editing this line: show faded #
+            return `<div style="font-size:5em;font-weight:bold;"><span style='opacity:0.5;margin-right:0.5em;'>#</span>${line.slice(2)}</div>`;
+          } else {
+            // Not editing: show as heading, no #
+            return `<div style="font-size:5em;font-weight:bold;">${line.slice(2)}</div>`;
           }
         }
         return `<div>${line}</div>`;
@@ -740,11 +750,11 @@ export default function HomePage() {
           />
         )}
         {/* Titlebar */}
-        <div className={`flex items-center justify-between ${isTransparent ? 'bg-transparent' : 'bg-white'} text-black px-4 py-2 border-b border-gray-200`}>
+        <div className={`flex items-center justify-between ${isTransparent ? 'bg-transparent' : 'bg-white'} text-black px-4 py-2 border-b border-gray-200 titlebar-drag-region`}>
           <div className="flex items-center space-x-4">
             <span className="font-semibold text-black">Lipi Editor</span>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-2 titlebar-no-drag">
             <button
               onClick={() => handleWindowControl('minimize')}
               className="p-2 hover:bg-gray-200 rounded-full transition-colors"
@@ -853,7 +863,7 @@ export default function HomePage() {
             </div>
 
             {/* Editor Content */}
-            <HybridMarkdownEditor value={value} onChange={setValue} />
+              <HybridMarkdownEditor value={value} onChange={setValue} />
           </div>
         </div>
         
