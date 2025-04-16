@@ -1,244 +1,259 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 
-const MARKDOWN_PATTERNS = {
-  heading: /^(#{1,6})\s(.+)$/,
-  bulletList: /^(\*|\-|\+)\s(.+)$/,
-  numberList: /^(\d+\.)\s(.+)$/,
-  blockquote: /^(>)\s(.+)$/,
-  codeBlock: /^(`{3})/,
-  bold: /(\*\*|__)(.+?)\1/g,
-  italic: /(\*|_)(.+?)\1/g,
-  inlineCode: /`(.+?)`/g,
-};
-
-const fadedStyle = {
-  opacity: 0.5,
-  marginRight: '0.5em',
-  fontWeight: 'normal',
-  color: '#94a3b8',
+const editorStyle: React.CSSProperties = {
+  width: '100%',
+  height: '100%',
+  padding: '16px 32px 8px 32px',
+  fontSize: '1em',
+  lineHeight: '1.5',
+  fontFamily: 'inherit',
+  outline: 'none',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+  overflowY: 'auto',
+  background: 'white',
+  border: 'none',
 };
 
 export default function HybridMarkdownEditor({ value, onChange }) {
-  const [lines, setLines] = useState(value.split('\n'));
-  const [activeLine, setActiveLine] = useState(0);
-  const [dynamicPadding, setDynamicPadding] = useState(50);
-  const textareaRef = useRef(null);
-  const overlayRef = useRef(null);
+  // Local editing value (not in React state)
+  const editorRef = useRef<HTMLDivElement>(null);
+  const currentValueRef = useRef(value);
+  const lastCaretOffsetRef = useRef(0);
+  const [activeLineIdx, setActiveLineIdx] = useState(0);
 
-  // Calculate padding based on text content
+  // Escape HTML for code
+  function escapeHTML(str: string): string {
+    return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c] || c));
+  }
+
+  // Render a single line with markdown cues if active
+  function renderMarkdownLine(line: string, isActive: boolean): string {
+    // Heading: # heading
+    if (/^#\s/.test(line)) {
+      // Always render #, but faded if active, invisible if not
+      const hashStyle = isActive
+        ? 'opacity:0.5;color:#94a3b8;user-select:none;display:inline-block;width:1ch;'
+        : 'opacity:0;visibility:hidden;user-select:none;display:inline-block;width:0;';
+      return `<span style='${hashStyle}'>#</span><span style='font-weight:700;font-size:1.3em;'>${line.slice(1)}</span>`;
+    }
+    // Bold: **bold**
+    if (isActive) {
+      line = line.replace(/\*\*(.+?)\*\*/g, (_, boldText) =>
+        `<span style='opacity:0.5;color:#94a3b8;user-select:none;'>**</span><strong style='font-weight:800;'>${boldText}</strong><span style='opacity:0.5;color:#94a3b8;user-select:none;'>**</span>`
+      );
+    } else {
+      line = line.replace(/\*\*(.+?)\*\*/g, (_, boldText) =>
+        `<strong style='font-weight:800;'>${boldText}</strong>`
+      );
+    }
+    // Inline code: `code`
+    if (isActive) {
+      line = line.replace(/`([^`]+)`/g, (_, codeText) =>
+        `<span style='opacity:0.5;color:#94a3b8;user-select:none;'></span><code style='background:#f1f5f9;padding:2px 4px;border-radius:4px;'>${escapeHTML(codeText)}</code><span style='opacity:0.5;color:#94a3b8;user-select:none;'></span>`
+      );
+    } else {
+      line = line.replace(/`([^`]+)`/g, (_, codeText) =>
+        `<code style='background:#f1f5f9;padding:2px 4px;border-radius:4px;'>${escapeHTML(codeText)}</code>`
+      );
+    }
+    return line;
+  }
+
+  // Render the full text, only active line gets faded cues
+  function markdownToHTML(text: string, activeLineIdx: number): string {
+    const lines = text.split(/\n/);
+    return lines.map((line, idx) => renderMarkdownLine(line, idx === activeLineIdx)).join('<br>');
+  }
+
+  // Get caret offset in plain text
+  function getCaretCharacterOffsetWithin(element: HTMLElement) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return 0;
+    const range = selection.getRangeAt(0);
+    let preCaretRange = range.cloneRange();
+    preCaretRange.selectNodeContents(element);
+    preCaretRange.setEnd(range.endContainer, range.endOffset);
+    return preCaretRange.toString().length;
+  }
+
+  // Get active line index based on caret offset
+  function getActiveLineIndex(text: string, caretOffset: number): number {
+    let count = 0, idx = 0;
+    for (const line of text.split('\n')) {
+      if (caretOffset <= count + line.length) return idx;
+      count += line.length + 1; // +1 for \n
+      idx++;
+    }
+    return idx;
+  }
+
+  // On mount/update: render HTML and set caret
+  // Only update DOM if value prop changes from outside
   useEffect(() => {
-    const currentLine = lines[activeLine] || '';
-    if (!currentLine.startsWith('#')) {
-      setDynamicPadding(8);
-      return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (value !== currentValueRef.current) {
+      // Set content and move caret to end
+      editor.innerHTML = markdownToHTML(value, activeLineIdx);
+      setCaretToOffset(editor, value.length);
+      currentValueRef.current = value;
     }
-    
-    // For heading lines, adjust padding based on content
-    const headingMatch = currentLine.match(/^(#+) (.*)$/);
-    if (!headingMatch) {
-      setDynamicPadding(8);
-      return;
-    }
+  }, [value, activeLineIdx]);
 
-    const hashLength = headingMatch[1].length;
-    const hashText = headingMatch[1];
-    // Calculate padding based on hash symbols width
-    const hashWidth = hashText.length * 10; // Approximate width of hash symbols
-    setDynamicPadding(hashWidth + 12);
-  }, [lines, activeLine]);
-
-  // Sync scroll between textarea and overlay
-  const handleScroll = () => {
-    if (textareaRef.current && overlayRef.current) {
-      overlayRef.current.scrollTop = textareaRef.current.scrollTop;
-      overlayRef.current.scrollLeft = textareaRef.current.scrollLeft;
+  // Listen for caret/selection changes globally
+  useEffect(() => {
+    function handleSelectionChange() {
+      const editor = editorRef.current;
+      if (!editor || document.activeElement !== editor) return;
+      const caretOffset = getCaretCharacterOffsetWithin(editor);
+      lastCaretOffsetRef.current = caretOffset;
+      const plain = editor.innerText;
+      const newActiveLineIdx = getActiveLineIndex(plain, caretOffset);
+      if (newActiveLineIdx !== activeLineIdx) {
+        setActiveLineIdx(newActiveLineIdx);
+        // Re-render cues only, do NOT forcibly move caret
+        editor.innerHTML = markdownToHTML(plain, newActiveLineIdx);
+        // DO NOT call setCaretToOffset here!
+      }
     }
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, [activeLineIdx]);
+
+  // On input: update value and re-render HTML with caret
+  const handleInput = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    // Save caret position in plain text BEFORE parsing
+    const caretOffset = getCaretCharacterOffsetWithin(editor);
+    lastCaretOffsetRef.current = caretOffset;
+    // Get plain text from DOM (user input)
+    const plain = editor.innerText;
+    currentValueRef.current = plain;
+    // Update cues/active line and re-render HTML if needed
+    const newActiveLineIdx = getActiveLineIndex(plain, caretOffset);
+    setActiveLineIdx(newActiveLineIdx);
+    editor.innerHTML = markdownToHTML(plain, newActiveLineIdx);
+    // Restore caret after re-render
+    setCaretToOffset(editor, caretOffset);
   };
 
-  const handleInput = (e) => {
-    const newValue = e.target.value;
-    const newLines = newValue.split('\n');
-    setLines(newLines);
-    onChange(newValue);
+
+  // On blur, sync to React state
+  const handleBlur = () => {
+    onChange(currentValueRef.current);
   };
 
-  const handleSelect = (e) => {
-    const pos = e.target.selectionStart;
-    const before = e.target.value.slice(0, pos);
-    setActiveLine(before.split('\n').length - 1);
-  };
 
-  const handleKeyDown = (e) => {
+  // Custom Enter handler to fix newline at end of formatted line
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      const currentLineIndex = e.target.value.substring(0, e.target.selectionStart).split('\n').length - 1;
-      const currentLine = lines[currentLineIndex];
-      const newLines = [...lines];
+      const editor = editorRef.current;
+      if (!editor) return;
+      // Use current plain value as source of truth
+      const caretOffset = getCaretCharacterOffsetWithin(editor);
+      let plain = currentValueRef.current;
+      // Insert newline at caret
+      plain = plain.slice(0, caretOffset) + '\n' + plain.slice(caretOffset);
+      currentValueRef.current = plain;
+      // Figure out which line and column we are now on
+      const before = plain.slice(0, caretOffset);
+      const linesBefore = before.split('\n');
+      const currentLineIdx = linesBefore.length - 1;
+      const colInLine = linesBefore[linesBefore.length - 1].length;
+      const newLineIdx = currentLineIdx + 1;
+      setActiveLineIdx(newLineIdx);
+      // Re-render
+      editor.innerHTML = markdownToHTML(plain, newLineIdx);
+      // Place caret at start of the new line
+      setCaretByLineCol(editor, newLineIdx, 0);
+      lastCaretOffsetRef.current = caretOffset + 1;
+    }
+  };
 
-      // Check for list continuation
-      const bulletMatch = currentLine.match(MARKDOWN_PATTERNS.bulletList);
-      const numberMatch = currentLine.match(MARKDOWN_PATTERNS.numberList);
-      const blockquoteMatch = currentLine.match(MARKDOWN_PATTERNS.blockquote);
-      
-      if (currentLine.trim() === '') {
-        // Empty line - break the pattern
-        newLines.splice(currentLineIndex + 1, 0, '');
-      } else if (bulletMatch) {
-        newLines.splice(currentLineIndex + 1, 0, `${bulletMatch[1]} `);
-      } else if (numberMatch) {
-        const nextNumber = parseInt(numberMatch[1]) + 1;
-        newLines.splice(currentLineIndex + 1, 0, `${nextNumber}. `);
-      } else if (blockquoteMatch) {
-        newLines.splice(currentLineIndex + 1, 0, '> ');
-      } else {
-        newLines.splice(currentLineIndex + 1, 0, '');
+
+
+  // Set caret at plain text offset robustly (multi-line, HTML nodes)
+  function setCaretToOffset(element: HTMLElement, offset: number): void {
+    let current = 0;
+    let found = false;
+    const walker = document.createTreeWalker(
+      element,
+      NodeFilter.SHOW_TEXT,
+      null
+    );
+    let node: Text | null = walker.nextNode() as Text;
+    while (node) {
+      const next = current + node.length;
+      if (offset <= next) {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        try {
+          range.setStart(node, Math.max(0, offset - current));
+          range.collapse(true);
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        } catch (e) {}
+        found = true;
+        break;
       }
-      
-      setLines(newLines);
-      onChange(newLines.join('\n'));
+      current = next;
+      node = walker.nextNode() as Text;
     }
-  };
-
-  const isActiveLineHeading = lines[activeLine]?.match(/^#+/);
-
-  // Overlay styles
-  const overlayStyle = {
-    position: 'absolute' as const,
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: '100%',
-    pointerEvents: 'none' as const,
-    color: '#111',
-    fontSize: '0.85em',
-    fontFamily: 'inherit',
-    whiteSpace: 'pre-wrap' as const,
-    wordBreak: 'break-word' as const,
-    padding: '28px 8px 8px 8px',
-    paddingLeft: isActiveLineHeading ? `${dynamicPadding}px` : '8px',
-    boxSizing: 'border-box' as const,
-    overflow: 'auto' as const,
-    lineHeight: '1.5',
-  };
-
-  const containerStyle = {
-    position: 'relative' as const,
-    width: '100%',
-    height: "100%",
-    padding: "9px 0px"
-  };
-
-  const textareaStyle = {
-    width: '100%',
-    fontSize: isActiveLineHeading ? '1.15em' : '0.85em', // Slightly reduced sizes
-    fontFamily: 'inherit',
-    color: 'transparent',
-    background: 'white',
-    caretColor: '#000',
-    position: 'relative' as const,
-    height: "100%",
-    zIndex: 1,
-    resize: 'none' as const,
-    padding: '19px 8px 8px 8px', // Reduced top padding
-    paddingLeft: isActiveLineHeading ? `${dynamicPadding}px` : '8px',
-    boxSizing: 'border-box' as const,
-    border: 'none',
-    outline: 'none',
-    overflow: 'auto' as const,
-    lineHeight: isActiveLineHeading ? '1.2' : '1.5',
-  };
-
-  const renderMarkdownLine = (line: string, isActive: boolean) => {
-    const styles: React.CSSProperties = {
-      fontSize: '0.85em',
-      lineHeight: '1.5',
-      display: 'flex',
-      alignItems: 'baseline',
-    };
-
-    // Handle headings
-    const headingMatch = line.match(MARKDOWN_PATTERNS.heading);
-    if (headingMatch) {
-      const [_, hashes, text] = headingMatch;
-      return (
-        <div style={styles}>
-          {isActive && <span style={fadedStyle}>{hashes} </span>}
-          <span style={{ 
-            fontSize: `${2 - (hashes.length * 0.1)}em`,
-            fontWeight: 'bold' 
-          }}>{text}</span>
-        </div>
-      );
+    // If we didn't find a node, set at end
+    if (!found && element.childNodes.length > 0) {
+      const last = element.childNodes[element.childNodes.length - 1];
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(last);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
     }
+  }
 
-    // Handle bullet lists
-    const bulletMatch = line.match(MARKDOWN_PATTERNS.bulletList);
-    if (bulletMatch) {
-      const [_, bullet, text] = bulletMatch;
-      return (
-        <div style={styles}>
-          {isActive && <span style={fadedStyle}>{bullet}</span>}
-          <span className='flex items-center gap-2 justify-center'><span className='h-1 w-1 flex rounded-full bg-gray-800/30'></span>{text}</span>
-        </div>
-      );
+  // Helper: set caret by line and column (for Enter)
+  function setCaretByLineCol(element: HTMLElement, lineIdx: number, col: number) {
+    // Find the text node at the start of the desired line
+    let currentLine = 0;
+    let currentCol = 0;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+    let node: Text | null = walker.nextNode() as Text;
+    while (node) {
+      const text = node.textContent || '';
+      let lineBreaks = text.split('\n');
+      for (let i = 0; i < lineBreaks.length; i++) {
+        if (currentLine === lineIdx) {
+          const sel = window.getSelection();
+          const range = document.createRange();
+          try {
+            range.setStart(node, Math.min(col, lineBreaks[i].length));
+            range.collapse(true);
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          } catch (e) {}
+          return;
+        }
+        currentLine++;
+      }
+      node = walker.nextNode() as Text;
     }
-
-    // Handle numbered lists
-    const numberMatch = line.match(MARKDOWN_PATTERNS.numberList);
-    if (numberMatch) {
-      const [_, number, text] = numberMatch;
-      return (
-        <div style={styles}>
-          {isActive && <span style={fadedStyle}>{number} </span>}
-          <span>{text}</span>
-        </div>
-      );
-    }
-
-    // Handle blockquotes
-    const quoteMatch = line.match(MARKDOWN_PATTERNS.blockquote);
-    if (quoteMatch) {
-      const [_, quote, text] = quoteMatch;
-      return (
-        <div style={{
-          ...styles,
-          borderLeft: '3px solid #cbd5e1',
-          paddingLeft: '1em',
-          color: '#64748b'
-        }}>
-          {isActive && <span style={fadedStyle}>{quote} </span>}
-          <span>{text}</span>
-        </div>
-      );
-    }
-
-    return <div style={styles}>{line || '\u200B'}</div>;
-  };
+  }
 
   return (
-    <div style={containerStyle}>
-      <textarea
-        className='textarea'
-        ref={textareaRef}
-        value={lines.join('\n')}
-        onChange={handleInput}
-        onKeyDown={handleKeyDown}
-        onSelect={handleSelect}
-        onScroll={handleScroll}
-        style={textareaStyle}
-        spellCheck={false}
-      />
-      <div
-        ref={overlayRef}
-        style={{ ...overlayStyle, zIndex: 2 }}
-        aria-hidden="true"
-      >
-        {lines.map((line, idx) => (
-          <div key={idx}>
-            {renderMarkdownLine(line, idx === activeLine)}
-          </div>
-        ))}
-      </div>
-    </div>
+    <div
+      ref={editorRef}
+      contentEditable
+      onInput={handleInput}
+      onKeyDown={handleKeyDown}
+      onBlur={handleBlur}
+      style={editorStyle}
+      spellCheck={false}
+      suppressContentEditableWarning
+      // Only set initial value from React; after that, DOM is source of truth
+      dangerouslySetInnerHTML={{ __html: markdownToHTML(currentValueRef.current, activeLineIdx) }}
+    />
   );
 }
