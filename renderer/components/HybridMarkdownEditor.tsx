@@ -15,14 +15,18 @@ const editorStyle: React.CSSProperties = {
   border: 'none',
 };
 
+const AUTOSAVE_KEY = 'hybrid-markdown-editor-autosave';
+
 export default function HybridMarkdownEditor({ value, onChange }) {
   // Local editing value (not in React state)
   const editorRef = useRef<HTMLDivElement>(null);
   const currentValueRef = useRef(value);
   const lastCaretOffsetRef = useRef(0);
   const [activeLineIdx, setActiveLineIdx] = useState(0);
+  const [saveStatus, setSaveStatus] = useState<'idle'|'saving'|'saved'>('idle');
+  const autosaveTimeout = useRef<NodeJS.Timeout|null>(null);
 
-  // Escape HTML for code
+  // Escape HTML for code//
   function escapeHTML(str: string): string {
     return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c] || c));
   }
@@ -89,17 +93,41 @@ export default function HybridMarkdownEditor({ value, onChange }) {
   }
 
   // On mount/update: render HTML and set caret
+  // On mount, load from autosave if present (ONLY ONCE)
+  useEffect(() => {
+    const saved = localStorage.getItem(AUTOSAVE_KEY);
+    if (saved && saved !== value) {
+      currentValueRef.current = saved;
+      const editor = editorRef.current;
+      if (editor) {
+        editor.innerHTML = markdownToHTML(saved, 0);
+        setCaretToOffset(editor, saved.length);
+      }
+      if (onChange) onChange(saved);
+    }
+    // Only run on mount
+    // eslint-disable-next-line
+  }, []);
+
   // Only update DOM if value prop changes from outside
+  // Track last externally loaded value
+  const lastLoadedValueRef = useRef(value);
+
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
-    if (value !== currentValueRef.current) {
-      // Set content and move caret to end
+    // Only update DOM from value if it actually changed from outside
+    if (value !== lastLoadedValueRef.current && value) {
       editor.innerHTML = markdownToHTML(value, activeLineIdx);
       setCaretToOffset(editor, value.length);
       currentValueRef.current = value;
+      lastLoadedValueRef.current = value;
+    } else {
+      // For all other updates (typing, autosave, saveStatus):
+      editor.innerHTML = markdownToHTML(currentValueRef.current, activeLineIdx);
+      setCaretToOffset(editor, lastCaretOffsetRef.current);
     }
-  }, [value, activeLineIdx]);
+  }, [value, activeLineIdx, saveStatus]);
 
   // Listen for caret/selection changes globally
   useEffect(() => {
@@ -122,6 +150,17 @@ export default function HybridMarkdownEditor({ value, onChange }) {
   }, [activeLineIdx]);
 
   // On input: update value and re-render HTML with caret
+  // Auto-save logic
+  function triggerAutoSave(val: string) {
+    setSaveStatus('saving');
+    if (autosaveTimeout.current) clearTimeout(autosaveTimeout.current);
+    autosaveTimeout.current = setTimeout(() => {
+      localStorage.setItem(AUTOSAVE_KEY, val);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 1000);
+    }, 1000);
+  }
+
   const handleInput = () => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -130,19 +169,22 @@ export default function HybridMarkdownEditor({ value, onChange }) {
     lastCaretOffsetRef.current = caretOffset;
     // Get plain text from DOM (user input)
     const plain = editor.innerText;
+    // Always update currentValueRef.current BEFORE DOM update
     currentValueRef.current = plain;
     // Update cues/active line and re-render HTML if needed
     const newActiveLineIdx = getActiveLineIndex(plain, caretOffset);
     setActiveLineIdx(newActiveLineIdx);
-    editor.innerHTML = markdownToHTML(plain, newActiveLineIdx);
+    editor.innerHTML = markdownToHTML(currentValueRef.current, newActiveLineIdx);
     // Restore caret after re-render
     setCaretToOffset(editor, caretOffset);
+    triggerAutoSave(plain);
   };
 
 
   // On blur, sync to React state
   const handleBlur = () => {
-    onChange(currentValueRef.current);
+    if (onChange) onChange(currentValueRef.current);
+    triggerAutoSave(currentValueRef.current);
   };
 
 
@@ -157,19 +199,21 @@ export default function HybridMarkdownEditor({ value, onChange }) {
       let plain = currentValueRef.current;
       // Insert newline at caret
       plain = plain.slice(0, caretOffset) + '\n' + plain.slice(caretOffset);
+      // Always update currentValueRef.current BEFORE any re-render/caret logic
       currentValueRef.current = plain;
+      lastCaretOffsetRef.current = caretOffset + 1;
       // Figure out which line and column we are now on
       const before = plain.slice(0, caretOffset);
       const linesBefore = before.split('\n');
       const currentLineIdx = linesBefore.length - 1;
-      const colInLine = linesBefore[linesBefore.length - 1].length;
       const newLineIdx = currentLineIdx + 1;
       setActiveLineIdx(newLineIdx);
       // Re-render
-      editor.innerHTML = markdownToHTML(plain, newLineIdx);
+      editor.innerHTML = markdownToHTML(currentValueRef.current, newLineIdx);
       // Place caret at start of the new line
-      setCaretByLineCol(editor, newLineIdx, 0);
-      lastCaretOffsetRef.current = caretOffset + 1;
+      setCaretToOffset(editor, caretOffset + 1);
+      // Prevent input handler from running again immediately after Enter
+      editor.focus();
     }
   };
 
@@ -179,6 +223,12 @@ export default function HybridMarkdownEditor({ value, onChange }) {
   function setCaretToOffset(element: HTMLElement, offset: number): void {
     let current = 0;
     let found = false;
+    // Only count text nodes that are not inside a markdown cue span (user-select:none)
+    function isCueNode(node: Node) {
+      if (!node.parentElement) return false;
+      const style = window.getComputedStyle(node.parentElement);
+      return style.userSelect === 'none';
+    }
     const walker = document.createTreeWalker(
       element,
       NodeFilter.SHOW_TEXT,
@@ -186,6 +236,10 @@ export default function HybridMarkdownEditor({ value, onChange }) {
     );
     let node: Text | null = walker.nextNode() as Text;
     while (node) {
+      if (isCueNode(node)) {
+        node = walker.nextNode() as Text;
+        continue;
+      }
       const next = current + node.length;
       if (offset <= next) {
         const sel = window.getSelection();
@@ -213,6 +267,7 @@ export default function HybridMarkdownEditor({ value, onChange }) {
       sel?.addRange(range);
     }
   }
+
 
   // Helper: set caret by line and column (for Enter)
   function setCaretByLineCol(element: HTMLElement, lineIdx: number, col: number) {
@@ -243,17 +298,23 @@ export default function HybridMarkdownEditor({ value, onChange }) {
   }
 
   return (
-    <div
-      ref={editorRef}
-      contentEditable
-      onInput={handleInput}
-      onKeyDown={handleKeyDown}
-      onBlur={handleBlur}
-      style={editorStyle}
-      spellCheck={false}
-      suppressContentEditableWarning
-      // Only set initial value from React; after that, DOM is source of truth
-      dangerouslySetInnerHTML={{ __html: markdownToHTML(currentValueRef.current, activeLineIdx) }}
-    />
+    <div style={{position:'relative', height:'100%'}}>
+      <div
+        ref={editorRef}
+        contentEditable
+        onInput={handleInput}
+        onKeyDown={handleKeyDown}
+        onBlur={handleBlur}
+        style={editorStyle}
+        spellCheck={false}
+        suppressContentEditableWarning
+        // Only set initial value from React; after that, DOM is source of truth
+        dangerouslySetInnerHTML={{ __html: markdownToHTML(currentValueRef.current, activeLineIdx) }}
+      />
+      <div style={{position:'absolute',bottom:8,right:16,fontSize:'0.9em',color:'#888'}}>
+        {saveStatus === 'saving' && 'Saving...'}
+        {saveStatus === 'saved' && 'Saved'}
+      </div>
+    </div>
   );
 }
