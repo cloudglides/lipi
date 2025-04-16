@@ -1,14 +1,21 @@
 'use client'; // if using Next.js app directory
 
 import dynamic from 'next/dynamic';
-import React, { useState, useEffect } from 'react';
-import MdxEditor from '../components/InitializedMDXEditor';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { RealmProvider } from '@mdxeditor/editor';
-import { MDXEditor } from '@mdxeditor/editor';
 import '@mdxeditor/editor/style.css';
 import DirectoryModal from '../components/DirectoryModal';
 import path from 'path';
+import { headingsPlugin } from '@mdxeditor/editor';
+import { Milkdown } from '@milkdown/react';
+import { nord } from '@milkdown/theme-nord';
+import { gfm } from '@milkdown/preset-gfm';
+import { listener, listenerCtx } from '@milkdown/plugin-listener';
+import { Editor, rootCtx, defaultValueCtx } from '@milkdown/core';
+import { Remirror, useRemirror, ThemeProvider } from '@remirror/react';
+import { MarkdownExtension } from '@remirror/extension-markdown';
+import HybridMarkdownEditor from '../components/HybridMarkdownEditor';
 
 declare global {
   interface Window {
@@ -53,43 +60,53 @@ const translations = {
 
 const translate = (key: string) => translations[key] || key;
 
-const plugins: any[] = []; // Empty plugins array
+const plugins = [
+  headingsPlugin({
+    allowedHeadingLevels: [1]
+  })
+];
 
 const globalStyles = `
+  .ProseMirror, .ProseMirror * {
+    color: #111 !important;
+  }
   .mdxeditor-content-editable {
-    color: inherit !important;
+    color: #111 !important;
   }
   [data-lexical-editor] {
-    color: inherit !important;
+    color: #111 !important;
   }
   [data-lexical-editor] *,
   [data-lexical-editor] [contenteditable="true"],
   [data-lexical-editor] [contenteditable="true"] * {
-    color: inherit !important;
+    color: #111 !important;
   }
   [contenteditable="true"] {
-    color: inherit !important;
+    color: #111 !important;
+  }
+  [data-lexical-editor] h1 {
+    font-weight: bold;
+    font-size: 1.5em;
+    margin: 1em 0;
+  }
+  [data-lexical-editor] h1::before {
+    content: '#';
+    opacity: 0.5;
+    margin-right: 0.5em;
   }
 `;
 
+delete require.cache[require.resolve('../components/TiptapEditor')];
+const TiptapEditor = dynamic(() => import('../components/TiptapEditor'), { ssr: false });
+
 export default function HomePage() {
-  const [fileSystem, setFileSystem] = useState<FileNode[]>([{
-    id: 'root',
-    name: 'root',
-    type: 'folder',
-    parentId: null,
-    children: [{
-      id: 'welcome',
-      name: 'Welcome.md',
-      type: 'file',
-      content: '# Welcome to Lipi\n\nThis is your first note. Start writing!',
-      parentId: 'root'
-    }]
-  }]);
+  const [activeLine, setActiveLine] = useState(0);
+  console.log('[HomePage] render');
+  const [fileSystem, setFileSystem] = useState<FileNode[]>([]);
   const [value, setValue] = useState(``);
   const [isTransparent, setIsTransparent] = useState(false);
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
-  const [currentFile, setCurrentFile] = useState<string | null>('welcome');
+  const [currentFile, setCurrentFile] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -98,9 +115,27 @@ export default function HomePage() {
   const [lipiDirectory, setLipiDirectory] = useState<string | null>(null);
   
   const router = useRouter();
-  const editorRef = React.useRef(null);
+
+  function parseMarkdown(text, activeLineIdx) {
+    return text
+      .split('\n')
+      .map((line, idx) => {
+        if (line.startsWith('# ')) {
+          if (idx === activeLineIdx) {
+            // Editing this line: show faded #
+            return `<div style="font-size:2em;font-weight:bold;"><span style='opacity:0.5;margin-right:0.5em;'>#</span>${line.slice(2)}</div>`;
+          } else {
+            // Not editing: show as heading, no #
+            return `<div style="font-size:2em;font-weight:bold;">${line.slice(2)}</div>`;
+          }
+        }
+        return `<div>${line}</div>`;
+      })
+      .join('');
+  }
 
   useEffect(() => {
+    console.log('[HomePage] mounted');
     const checkSavedDirectory = async () => {
       const savedPath = await window.electron.ipcRenderer.invoke('get-saved-directory');
       if (savedPath) {
@@ -187,10 +222,6 @@ export default function HomePage() {
                     content: contentResult.content
                   });
                   node.content = contentResult.content;
-                  // If this is the current file, update the editor value
-                  if (currentFile === nodeId) {
-                    setValue(contentResult.content);
-                  }
                 } else {
                   console.error('Failed to load file content:', {
                     name: item.name,
@@ -212,13 +243,25 @@ export default function HomePage() {
           rootNode.children = await processItems(result.contents, 'root');
           console.log('Final file system state:', rootNode);
           setFileSystem([rootNode]);
+
+          // If we have files, select the first one
+          if (rootNode.children && rootNode.children.length > 0) {
+            const firstFile = rootNode.children.find(node => node.type === 'file');
+            if (firstFile) {
+              console.log('Selecting first file:', firstFile);
+              setCurrentFile(firstFile.id);
+              if (firstFile.content) {
+                setValue(firstFile.content);
+              }
+            }
+          }
         } else {
           console.error('Failed to load directory:', result.reason);
         }
       }
     };
     loadFileSystem();
-  }, [lipiDirectory, currentFile]);
+  }, [lipiDirectory]);
 
   // Handle Ctrl+S for saving
   useEffect(() => {
@@ -234,7 +277,7 @@ export default function HomePage() {
               path: file.path,
               content: value
             });
-            handleEditorChange(value);
+            window.electron.ipcRenderer.invoke('write-file', file.path, value);
           }
         }
       }
@@ -284,53 +327,8 @@ export default function HomePage() {
     window.electron.ipcRenderer.send('window-control', action);
   };
 
-  const handleEditorChange = async (newValue: string) => {
-    console.log('=== HANDLE EDITOR CHANGE START ===');
-    console.log('handleEditorChange called with:', {
-      currentValue: value,
-      newValue,
-      currentFile,
-      valueLength: newValue.length,
-      newValuePreview: newValue.substring(0, 50)
-    });
-
-    if (!currentFile) {
-      console.error('No current file selected');
-      return;
-    }
-
-    const file = findFileById(currentFile, fileSystem);
-    if (!file || file.type !== 'file') {
-      console.error('File not found or not a file:', {
-        currentFile,
-        file
-      });
-      return;
-    }
-
-    // Update in-memory state
+  const handleEditorChange = (newValue: string) => {
     setValue(newValue);
-    const updatedFS = updateFileContent(currentFile, newValue, fileSystem);
-    setFileSystem(updatedFS);
-
-    // Save to disk
-    try {
-      const filePath = path.join(lipiDirectory, file.name);
-      console.log('Saving to file:', {
-        filePath,
-        contentLength: newValue.length,
-        contentPreview: newValue.substring(0, 50)
-      });
-
-      const result = await window.electron.ipcRenderer.invoke('write-file', filePath, newValue);
-      if (!result.success) {
-        console.error('Failed to save file:', result.reason);
-      }
-    } catch (error) {
-      console.error('Error saving file:', error);
-    }
-
-    console.log('=== HANDLE EDITOR CHANGE END ===');
   };
 
   const confirmRename = async (id: string, newName: string) => {
@@ -543,6 +541,15 @@ export default function HomePage() {
       value
     });
     
+    const node = findFileById(id, fileSystem);
+    if (!node) return;
+
+    // If selecting a folder, just update the currentFile state
+    if (node.type === 'folder') {
+      setCurrentFile(id);
+      return;
+    }
+    
     // If we're switching from a file that has unsaved changes, save them first
     if (currentFile) {
       const currentFileNode = findFileById(currentFile, fileSystem);
@@ -559,16 +566,15 @@ export default function HomePage() {
     
     setCurrentFile(id);
     
-    const file = findFileById(id, fileSystem);
-    if (file && file.type === 'file') {
+    if (node.type === 'file') {
       console.log('Loading file content:', {
         id,
-        name: file.name,
-        path: file.path
+        name: node.name,
+        path: node.path
       });
       
       // Load content from disk
-      const result = await window.electron.ipcRenderer.invoke('read-file', file.path);
+      const result = await window.electron.ipcRenderer.invoke('read-file', node.path);
       console.log('Read file result:', {
         success: result.success,
         contentLength: result.success ? result.content.length : 0,
@@ -578,7 +584,7 @@ export default function HomePage() {
       if (result.success) {
         console.log('Updating editor with content:', {
           id,
-          name: file.name,
+          name: node.name,
           contentLength: result.content.length,
           contentPreview: result.content.substring(0, 100)
         });
@@ -587,16 +593,10 @@ export default function HomePage() {
         setValue(result.content);
         const updatedFS = updateFileContent(id, result.content, fileSystem);
         setFileSystem(updatedFS);
-        
-        // Force editor to update by setting a temporary value and then the actual content
-        setValue('');
-        setTimeout(() => {
-          setValue(result.content);
-        }, 0);
       } else {
         console.error('Failed to load file content:', {
           id,
-          name: file.name,
+          name: node.name,
           error: result.reason
         });
       }
@@ -708,6 +708,27 @@ export default function HomePage() {
     ));
   };
 
+  // Only update value when switching files
+  useEffect(() => {
+    if (currentFile) {
+      const file = findFileById(currentFile, fileSystem);
+      if (file && file.type === 'file') {
+        setValue(file.content || '');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFile]);
+
+  useEffect(() => {
+    console.log('[HomePage] value state changed:', value);
+  }, [value]);
+
+  useEffect(() => {
+    return () => {
+      console.log('[HomePage] unmounted');
+    };
+  }, []);
+
   return (
     <RealmProvider>
       <style jsx global>{globalStyles}</style>
@@ -786,7 +807,13 @@ export default function HomePage() {
 
             {/* File Tree */}
             <div className="flex-1 overflow-y-auto px-1 py-2">
-              {renderFileTree(fileSystem[0].children || [])}
+              {fileSystem.length > 0 && fileSystem[0].children ? (
+                renderFileTree(fileSystem[0].children)
+              ) : (
+                <div className="text-center text-gray-500 py-4">
+                  No files found. Select a directory to get started.
+                </div>
+              )}
             </div>
           </div>
 
@@ -820,48 +847,13 @@ export default function HomePage() {
                   </svg>
                 </button>
               </div>
-              <span className="ml-4 text-sm text-gray-600">{currentFile}</span>
+              <span className="ml-4 text-sm text-gray-600">
+                {currentFile ? findFileById(currentFile, fileSystem)?.name || '' : ''}
+              </span>
             </div>
 
             {/* Editor Content */}
-            <div className={`flex-1 overflow-auto ${isTransparent ? '' : 'bg-white'}`}>
-              {currentFile && (
-                <MDXEditor
-                  key={currentFile}
-        markdown={value}
-                  onChange={(newValue) => {
-                    console.log('=== EDITOR ONCHANGE START ===');
-                    console.log('Editor content changed:', {
-                      currentValue: value,
-                      newValue,
-                      currentFile,
-                      valueLength: newValue.length,
-                      newValuePreview: newValue.substring(0, 100),
-                      isDifferent: newValue !== value
-                    });
-                    
-                    // Update the value state immediately
-                    setValue(newValue);
-                    
-                    // Then call handleEditorChange
-                    handleEditorChange(newValue);
-                    console.log('=== EDITOR ONCHANGE END ===');
-                  }}
-                  plugins={plugins}
-                  contentEditableClassName={`prose max-w-none bg-transparent p-4 outline-none focus:outline-none focus:ring-0 [&_*]:outline-none [&_*]:focus:outline-none [&_*]:focus:ring-0 ${
-                    isTransparent 
-                      ? 'text-white [&]:text-white [&_*]:text-white' 
-                      : 'text-black [&]:text-black [&_*]:text-black'
-                  }`}
-                  className={`outline-none focus:outline-none focus:ring-0 ${
-                    isTransparent 
-                      ? 'text-white bg-transparent' 
-                      : 'text-black bg-white'
-                  }`}
-                  translation={translate}
-                />
-              )}
-            </div>
+            <HybridMarkdownEditor value={value} onChange={setValue} />
           </div>
         </div>
         
